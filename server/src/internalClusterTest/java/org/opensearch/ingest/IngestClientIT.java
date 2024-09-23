@@ -162,14 +162,6 @@ public class IngestClientIT extends ParameterizedStaticSettingsOpenSearchIntegTe
     }
 
     public void testBulkWithIngestFailures() throws Exception {
-        runBulkTestWithRandomDocs(false);
-    }
-
-    public void testBulkWithIngestFailuresWithBatchSize() throws Exception {
-        runBulkTestWithRandomDocs(true);
-    }
-
-    private void runBulkTestWithRandomDocs(boolean shouldSetBatchSize) throws Exception {
         createIndex("index");
 
         BytesReference source = BytesReference.bytes(
@@ -188,9 +180,6 @@ public class IngestClientIT extends ParameterizedStaticSettingsOpenSearchIntegTe
 
         int numRequests = scaledRandomIntBetween(32, 128);
         BulkRequest bulkRequest = new BulkRequest();
-        if (shouldSetBatchSize) {
-            bulkRequest.batchSize(scaledRandomIntBetween(2, numRequests));
-        }
         for (int i = 0; i < numRequests; i++) {
             IndexRequest indexRequest = new IndexRequest("index").id(Integer.toString(i)).setPipeline("_id");
             indexRequest.source(Requests.INDEX_CONTENT_TYPE, "field", "value", "fail", i % 2 == 0);
@@ -226,7 +215,7 @@ public class IngestClientIT extends ParameterizedStaticSettingsOpenSearchIntegTe
         assertTrue(deletePipelineResponse.isAcknowledged());
     }
 
-    public void testBulkWithIngestFailuresAndDropBatch() throws Exception {
+    public void testBulkWithIngestFailuresAndDrop() throws Exception {
         createIndex("index");
 
         BytesReference source = BytesReference.bytes(
@@ -244,7 +233,6 @@ public class IngestClientIT extends ParameterizedStaticSettingsOpenSearchIntegTe
         client().admin().cluster().putPipeline(putPipelineRequest).get();
 
         BulkRequest bulkRequest = new BulkRequest();
-        bulkRequest.batchSize(3);
         bulkRequest.add(
             new IndexRequest("index").id("_fail").setPipeline("_id").source(Requests.INDEX_CONTENT_TYPE, "field", "value", "fail", true)
         );

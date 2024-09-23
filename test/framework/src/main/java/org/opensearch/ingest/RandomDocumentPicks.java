@@ -150,6 +150,13 @@ public final class RandomDocumentPicks {
     }
 
     /**
+     * Generates a random IngestDocumentWrapper
+     */
+    public static IngestDocumentWrapper randomIngestDocumentWrapper(int slot, Random random) {
+        return new IngestDocumentWrapper(slot, randomIngestDocument(random), null);
+    }
+
+    /**
      * Generates a random document and random metadata
      */
     public static IngestDocument randomIngestDocument(Random random) {

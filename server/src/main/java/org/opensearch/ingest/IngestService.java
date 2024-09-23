@@ -39,7 +39,6 @@ import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchParseException;
 import org.opensearch.ResourceNotFoundException;
 import org.opensearch.action.DocWriteRequest;
-import org.opensearch.action.bulk.BulkRequest;
 import org.opensearch.action.bulk.TransportBulkAction;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.ingest.DeletePipelineRequest;
@@ -550,8 +549,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         BiConsumer<Integer, Exception> onFailure,
         BiConsumer<Thread, Exception> onCompletion,
         IntConsumer onDropped,
-        String executorName,
-        BulkRequest originalBulkRequest
+        String executorName
     ) {
         threadPool.executor(executorName).execute(new AbstractRunnable() {
 
@@ -562,7 +560,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
 
             @Override
             protected void doRun() {
-                runBulkRequestInBatch(numberOfActionRequests, actionRequests, onFailure, onCompletion, onDropped, originalBulkRequest);
+                runBulkRequestInBatch(numberOfActionRequests, actionRequests, onFailure, onCompletion, onDropped);
             }
         });
     }
@@ -572,8 +570,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         Iterable<DocWriteRequest<?>> actionRequests,
         BiConsumer<Integer, Exception> onFailure,
         BiConsumer<Thread, Exception> onCompletion,
-        IntConsumer onDropped,
-        BulkRequest originalBulkRequest
+        IntConsumer onDropped
     ) {
 
         final Thread originalThread = Thread.currentThread();
@@ -618,9 +615,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
             i++;
         }
 
-        int batchSize = Math.min(numberOfActionRequests, originalBulkRequest.batchSize());
-        List<List<IndexRequestWrapper>> batches = prepareBatches(batchSize, indexRequestWrappers);
-        logger.debug("batchSize: {}, batches: {}", batchSize, batches.size());
+        List<List<IndexRequestWrapper>> batches = prepareBatches(numberOfActionRequests, indexRequestWrappers);
 
         for (List<IndexRequestWrapper> batch : batches) {
             executePipelinesInBatchRequests(
@@ -717,20 +712,6 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         final BiConsumer<Thread, Exception> onCompletion,
         final Thread originalThread
     ) {
-        if (indexRequests.size() == 1) {
-            executePipelines(
-                slots.get(0),
-                pipelineIterator,
-                hasFinalPipeline,
-                indexRequests.get(0),
-                onDropped,
-                onFailure,
-                counter,
-                onCompletion,
-                originalThread
-            );
-            return;
-        }
         while (pipelineIterator.hasNext()) {
             final String pipelineId = pipelineIterator.next();
             try {
@@ -837,105 +818,6 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         }
     }
 
-    private void executePipelines(
-        final int slot,
-        final Iterator<String> it,
-        final boolean hasFinalPipeline,
-        final IndexRequest indexRequest,
-        final IntConsumer onDropped,
-        final BiConsumer<Integer, Exception> onFailure,
-        final AtomicInteger counter,
-        final BiConsumer<Thread, Exception> onCompletion,
-        final Thread originalThread
-    ) {
-        while (it.hasNext()) {
-            final String pipelineId = it.next();
-            try {
-                PipelineHolder holder = pipelines.get(pipelineId);
-                if (holder == null) {
-                    throw new IllegalArgumentException("pipeline with id [" + pipelineId + "] does not exist");
-                }
-                Pipeline pipeline = holder.pipeline;
-                String originalIndex = indexRequest.indices()[0];
-                innerExecute(slot, indexRequest, pipeline, onDropped, e -> {
-                    if (e != null) {
-                        logger.debug(
-                            () -> new ParameterizedMessage(
-                                "failed to execute pipeline [{}] for document [{}/{}]",
-                                pipelineId,
-                                indexRequest.index(),
-                                indexRequest.id()
-                            ),
-                            e
-                        );
-                        onFailure.accept(slot, e);
-                    }
-
-                    Iterator<String> newIt = it;
-                    boolean newHasFinalPipeline = hasFinalPipeline;
-                    String newIndex = indexRequest.indices()[0];
-
-                    if (Objects.equals(originalIndex, newIndex) == false) {
-                        if (hasFinalPipeline && it.hasNext() == false) {
-                            totalMetrics.failed();
-                            onFailure.accept(
-                                slot,
-                                new IllegalStateException("final pipeline [" + pipelineId + "] can't change the target index")
-                            );
-                        } else {
-
-                            // Drain old it so it's not looped over
-                            it.forEachRemaining($ -> {});
-                            indexRequest.isPipelineResolved(false);
-                            resolvePipelines(null, indexRequest, state.metadata());
-                            if (IngestService.NOOP_PIPELINE_NAME.equals(indexRequest.getFinalPipeline()) == false) {
-                                newIt = Collections.singleton(indexRequest.getFinalPipeline()).iterator();
-                                newHasFinalPipeline = true;
-                            } else {
-                                newIt = Collections.emptyIterator();
-                            }
-                        }
-                    }
-
-                    if (newIt.hasNext()) {
-                        executePipelines(
-                            slot,
-                            newIt,
-                            newHasFinalPipeline,
-                            indexRequest,
-                            onDropped,
-                            onFailure,
-                            counter,
-                            onCompletion,
-                            originalThread
-                        );
-                    } else {
-                        if (counter.decrementAndGet() == 0) {
-                            onCompletion.accept(originalThread, null);
-                        }
-                        assert counter.get() >= 0;
-                    }
-                });
-            } catch (Exception e) {
-                logger.debug(
-                    () -> new ParameterizedMessage(
-                        "failed to execute pipeline [{}] for document [{}/{}]",
-                        pipelineId,
-                        indexRequest.index(),
-                        indexRequest.id()
-                    ),
-                    e
-                );
-                onFailure.accept(slot, e);
-                if (counter.decrementAndGet() == 0) {
-                    onCompletion.accept(originalThread, null);
-                }
-                assert counter.get() >= 0;
-                break;
-            }
-        }
-    }
-
     public IngestStats stats() {
         IngestStats.Builder statsBuilder = new IngestStats.Builder();
         statsBuilder.addTotalMetrics(totalMetrics);
@@ -985,45 +867,6 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
             sb.append(tag);
         }
         return sb.toString();
-    }
-
-    private void innerExecute(
-        int slot,
-        IndexRequest indexRequest,
-        Pipeline pipeline,
-        IntConsumer itemDroppedHandler,
-        Consumer<Exception> handler
-    ) {
-        if (pipeline.getProcessors().isEmpty()) {
-            handler.accept(null);
-            return;
-        }
-
-        long startTimeInNanos = System.nanoTime();
-        // the pipeline specific stat holder may not exist and that is fine:
-        // (e.g. the pipeline may have been removed while we're ingesting a document
-        totalMetrics.before();
-        String index = indexRequest.index();
-        String id = indexRequest.id();
-        String routing = indexRequest.routing();
-        Long version = indexRequest.version();
-        VersionType versionType = indexRequest.versionType();
-        Map<String, Object> sourceAsMap = indexRequest.sourceAsMap();
-        IngestDocument ingestDocument = new IngestDocument(index, id, routing, version, versionType, sourceAsMap);
-        ingestDocument.executePipeline(pipeline, (result, e) -> {
-            long ingestTimeInMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeInNanos);
-            totalMetrics.after(ingestTimeInMillis);
-            if (e != null) {
-                totalMetrics.failed();
-                handler.accept(e);
-            } else if (result == null) {
-                itemDroppedHandler.accept(slot);
-                handler.accept(null);
-            } else {
-                updateIndexRequestWithIngestDocument(indexRequest, ingestDocument);
-                handler.accept(null);
-            }
-        });
     }
 
     private void innerBatchExecute(
